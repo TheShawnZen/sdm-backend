@@ -1,8 +1,16 @@
-# pylint: disable=unused-import
-
 import argparse
 import binascii
 import io
+
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+key_hex = os.getenv("SDM_KEY")
+if not key_hex:
+    raise RuntimeError("Missing SDM_KEY in environment")
+key = bytes.fromhex(key_hex)
 
 from flask import Flask, jsonify, render_template, request
 from werkzeug.exceptions import BadRequest
@@ -11,7 +19,6 @@ from config import (
     CTR_PARAM,
     ENC_FILE_DATA_PARAM,
     ENC_PICC_DATA_PARAM,
-    REQUIRE_LRP,
     SDMMAC_PARAM,
     MASTER_KEY,
     UID_PARAM,
@@ -52,10 +59,10 @@ def handler_not_found(err):
     return render_template('error.html', code=404, msg=str(err)), 404
 
 
-@app.context_processor
-def inject_demo_mode():
-    demo_mode = MASTER_KEY == (b"\x00" * 16)
-    return {"demo_mode": demo_mode}
+# @app.context_processor
+# def inject_demo_mode():
+#     demo_mode = MASTER_KEY == (b"\x00" * 16)
+#     return {"demo_mode": demo_mode}
 
 
 @app.route('/')
@@ -66,7 +73,6 @@ def sdm_main():
     return render_template('sdm_main.html')
 
 
-# pylint:  disable=too-many-branches
 def parse_parameters():
     arg_e = request.args.get('e')
     if arg_e:
@@ -79,21 +85,10 @@ def parse_parameters():
 
         e_buf = io.BytesIO(e_b)
 
+        # Only AES (16 byte PICCEncData) allowed now
         if (len(e_b) - 8) % 16 == 0:
-            # using AES (16 byte PICCEncData)
             file_len = len(e_b) - 16 - 8
             enc_picc_data_b = e_buf.read(16)
-
-            if file_len > 0:
-                enc_file_data_b = e_buf.read(file_len)
-            else:
-                enc_file_data_b = None
-
-            sdmmac_b = e_buf.read(8)
-        elif (len(e_b) - 8) % 16 == 8:
-            # using LRP (24 byte PICCEncData)
-            file_len = len(e_b) - 24 - 8
-            enc_picc_data_b = e_buf.read(24)
 
             if file_len > 0:
                 enc_file_data_b = e_buf.read(file_len)
@@ -128,76 +123,6 @@ def parse_parameters():
     return param_mode, enc_picc_data_b, enc_file_data_b, sdmmac_b
 
 
-@app.route('/tagpt')
-def sdm_info_plain():
-    """
-    Return HTML
-    """
-    return _internal_tagpt()
-
-
-@app.route('/api/tagpt')
-def sdm_api_info_plain():
-    """
-    Return JSON
-    """
-    try:
-        return _internal_tagpt(force_json=True)
-    except BadRequest as err:
-        return jsonify({"error": str(err)}), 400
-
-
-def _internal_tagpt(force_json=False):
-    try:
-        uid = binascii.unhexlify(request.args[UID_PARAM])
-        read_ctr = binascii.unhexlify(request.args[CTR_PARAM])
-        cmac = binascii.unhexlify(request.args[SDMMAC_PARAM])
-    except binascii.Error:
-        raise BadRequest("Failed to decode parameters.") from None
-
-    try:
-        sdm_file_read_key = derive_tag_key(MASTER_KEY, uid, 2)
-        res = validate_plain_sun(uid=uid,
-                                 read_ctr=read_ctr,
-                                 sdmmac=cmac,
-                                 sdm_file_read_key=sdm_file_read_key)
-    except InvalidMessage:
-        raise BadRequest("Invalid message (most probably wrong signature).") from None
-
-    if REQUIRE_LRP and res['encryption_mode'] != EncMode.LRP:
-        raise BadRequest("Invalid encryption mode, expected LRP.")
-
-    if request.args.get("output") == "json" or force_json:
-        return jsonify({
-            "uid": res['uid'].hex().upper(),
-            "read_ctr": res['read_ctr'],
-            "enc_mode": res['encryption_mode'].name
-        })
-
-    return render_template('sdm_info.html',
-                           encryption_mode=res['encryption_mode'].name,
-                           uid=res['uid'],
-                           read_ctr_num=res['read_ctr'])
-
-
-@app.route('/webnfc')
-def sdm_webnfc():
-    return render_template('sdm_webnfc.html')
-
-
-@app.route('/tagtt')
-def sdm_info_tt():
-    return _internal_sdm(with_tt=True)
-
-
-@app.route('/api/tagtt')
-def sdm_api_info_tt():
-    try:
-        return _internal_sdm(with_tt=True, force_json=True)
-    except BadRequest as err:
-        return jsonify({"error": str(err)})
-
-
 @app.route('/tag')
 def sdm_info():
     return _internal_sdm(with_tt=False)
@@ -208,28 +133,28 @@ def sdm_api_info():
     try:
         return _internal_sdm(with_tt=False, force_json=True)
     except BadRequest as err:
-        return jsonify({"error": str(err)})
+        return jsonify({"error": str(err)}), 400
 
 
-# pylint:  disable=too-many-branches, too-many-statements, too-many-locals
 def _internal_sdm(with_tt=False, force_json=False):
     """
     SUN decrypting/validating endpoint.
     """
     param_mode, enc_picc_data_b, enc_file_data_b, sdmmac_b = parse_parameters()
 
+
+
     try:
         res = decrypt_sun_message(param_mode=param_mode,
-                                  sdm_meta_read_key=derive_undiversified_key(MASTER_KEY, 1),
-                                  sdm_file_read_key=lambda uid: derive_tag_key(MASTER_KEY, uid, 2),
+                                  sdm_meta_read_key=key,
+                                  sdm_file_read_key=lambda uid: key,
                                   picc_enc_data=enc_picc_data_b,
                                   sdmmac=sdmmac_b,
                                   enc_file_data=enc_file_data_b)
     except InvalidMessage:
-        raise BadRequest("Invalid message (most probably wrong signature).") from InvalidMessage
+        raise BadRequest("Invalid message (most probably wrong signature).") from None
 
-    if REQUIRE_LRP and res['encryption_mode'] != EncMode.LRP:
-        raise BadRequest("Invalid encryption mode, expected LRP.")
+    # No LRP check here, only AES expected
 
     picc_data_tag = res['picc_data_tag']
     uid = res['uid']
@@ -242,7 +167,7 @@ def _internal_sdm(with_tt=False, force_json=False):
     tt_status = ""
     tt_color = ""
 
-    if res['file_data']:
+    if file_data:
         if param_mode == ParamMode.BULK:
             file_data_len = file_data[2]
             file_data_unpacked = file_data[3:3 + file_data_len]
@@ -305,6 +230,7 @@ if __name__ == '__main__':
     parser.add_argument('--host', type=str, nargs='?', help='address to listen on')
     parser.add_argument('--port', type=int, nargs='?', help='port to listen on')
 
-    args = parser.parse_args()
+    # args = parser.parse_args()
 
-    app.run(host=args.host, port=args.port)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)

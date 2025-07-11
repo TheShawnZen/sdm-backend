@@ -1,3 +1,17 @@
-config.py
-__pycache__/
-/venv/
+
+
+# Virtual environment
+venv/
+.env
+.env.*
+
+
+# IDE/editor files
+
+
+# Logs
+*.log
+
+
+# MacOS files
+.DS_Store
